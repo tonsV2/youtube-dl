@@ -1,6 +1,7 @@
 version: '3.3'
 services:
   youtube-dl:
+    image: tons/youtube-dl
     build: .
     volumes:
       - ./downloads:/downloads
