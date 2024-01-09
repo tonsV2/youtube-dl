@@ -82,7 +82,7 @@ def _js_arith_op(op):
 
 
 def _js_div(a, b):
-    if JS_Undefined in (a, b) or not (a and b):
+    if JS_Undefined in (a, b) or not (a or b):
         return _NaN
     return operator.truediv(a or 0, b) if b else float('inf')
 
@@ -277,9 +277,20 @@ class JSInterpreter(object):
 
         def __getattr__(self, name):
             self.__instantiate()
-            if hasattr(self, name):
-                return getattr(self, name)
-            return super(JSInterpreter.JS_RegExp, self).__getattr__(name)
+            # make Py 2.6 conform to its lying documentation
+            if name == 'flags':
+                self.flags = self.__flags
+                return self.flags
+            elif name == 'pattern':
+                self.pattern = self.__pattern_txt
+                return self.pattern
+            elif hasattr(self.__self, name):
+                v = getattr(self.__self, name)
+                setattr(self, name, v)
+                return v
+            elif name in ('groupindex', 'groups'):
+                return 0 if name == 'groupindex' else {}
+            raise AttributeError('{0} has no attribute named {1}'.format(self, name))
 
         @classmethod
         def regex_flags(cls, expr):
@@ -940,16 +951,19 @@ class JSInterpreter(object):
     def extract_object(self, objname):
         _FUNC_NAME_RE = r'''(?:[a-zA-Z$0-9]+|"[a-zA-Z$0-9]+"|'[a-zA-Z$0-9]+')'''
         obj = {}
-        obj_m = re.search(
-            r'''(?x)
-                (?<!this\.)%s\s*=\s*{\s*
-                    (?P<fields>(%s\s*:\s*function\s*\(.*?\)\s*{.*?}(?:,\s*)?)*)
-                }\s*;
-            ''' % (re.escape(objname), _FUNC_NAME_RE),
-            self.code)
-        if not obj_m:
+        fields = None
+        for obj_m in re.finditer(
+                r'''(?xs)
+                    {0}\s*\.\s*{1}|{1}\s*=\s*\{{\s*
+                        (?P<fields>({2}\s*:\s*function\s*\(.*?\)\s*\{{.*?}}(?:,\s*)?)*)
+                    }}\s*;
+                '''.format(_NAME_RE, re.escape(objname), _FUNC_NAME_RE),
+                self.code):
+            fields = obj_m.group('fields')
+            if fields:
+                break
+        else:
             raise self.Exception('Could not find object ' + objname)
-        fields = obj_m.group('fields')
         # Currently, it only supports function definitions
         fields_m = re.finditer(
             r'''(?x)
@@ -985,9 +999,9 @@ class JSInterpreter(object):
                 \((?P<args>[^)]*)\)\s*
                 (?P<code>{.+})''' % {'name': re.escape(funcname)},
             self.code)
-        code, _ = self._separate_at_paren(func_m.group('code'))  # refine the match
         if func_m is None:
             raise self.Exception('Could not find JS function "{funcname}"'.format(**locals()))
+        code, _ = self._separate_at_paren(func_m.group('code'))  # refine the match
         return self.build_arglist(func_m.group('args')), code
 
     def extract_function(self, funcname):

@@ -260,16 +260,10 @@ class YoutubeBaseInfoExtractor(InfoExtractor):
         cookies = self._get_cookies('https://www.youtube.com/')
         if cookies.get('__Secure-3PSID'):
             return
-        consent_id = None
-        consent = cookies.get('CONSENT')
-        if consent:
-            if 'YES' in consent.value:
-                return
-            consent_id = self._search_regex(
-                r'PENDING\+(\d+)', consent.value, 'consent', default=None)
-        if not consent_id:
-            consent_id = random.randint(100, 999)
-        self._set_cookie('.youtube.com', 'CONSENT', 'YES+cb.20210328-17-p0.en+FX+%s' % consent_id)
+        socs = cookies.get('SOCS')
+        if socs and not socs.value.startswith('CAA'):  # not consented
+            return
+        self._set_cookie('.youtube.com', 'SOCS', 'CAI', secure=True)  # accept all (required for mixes)
 
     def _real_initialize(self):
         self._initialize_consent()
@@ -448,7 +442,7 @@ class YoutubeBaseInfoExtractor(InfoExtractor):
             extract_attributes(self._search_regex(
                 r'''(?s)(<link\b[^>]+\bitemprop\s*=\s*("|')%s\2[^>]*>)'''
                 % re.escape(var_name),
-                get_element_by_attribute('itemprop', 'author', webpage) or '',
+                get_element_by_attribute('itemprop', 'author', webpage or '') or '',
                 'author link', default='')),
             paths[var_name][0])
 
@@ -1570,7 +1564,9 @@ class YoutubeIE(YoutubeBaseInfoExtractor):
             jscode, 'Initial JS player signature function name', group='sig')
 
         jsi = JSInterpreter(jscode)
+
         initial_function = jsi.extract_function(funcname)
+
         return lambda s: initial_function([s])
 
     def _decrypt_signature(self, s, video_id, player_url):
@@ -1621,15 +1617,22 @@ class YoutubeIE(YoutubeBaseInfoExtractor):
         nfunc, idx = re.match(target, nfunc_and_idx).group('nfunc', 'idx')
         if not idx:
             return nfunc
+
+        VAR_RE_TMPL = r'var\s+%s\s*=\s*(?P<name>\[(?P<alias>%s)\])[;,]'
+        note = 'Initial JS player n function {0} (%s[%s])' % (nfunc, idx)
+
+        def search_function_code(needle, group):
+            return self._search_regex(
+                VAR_RE_TMPL % (re.escape(nfunc), needle), jscode,
+                note.format(group), group=group)
+
         if int_or_none(idx) == 0:
-            real_nfunc = self._search_regex(
-                r'var %s\s*=\s*\[([a-zA-Z_$][\w$]*)\];' % (re.escape(nfunc), ), jscode,
-                'Initial JS player n function alias ({nfunc}[{idx}])'.format(**locals()))
+            real_nfunc = search_function_code(r'[a-zA-Z_$][\w$]*', group='alias')
             if real_nfunc:
                 return real_nfunc
-        return self._parse_json(self._search_regex(
-            r'var %s\s*=\s*(\[.+?\]);' % (re.escape(nfunc), ), jscode,
-            'Initial JS player n function name ({nfunc}[{idx}])'.format(**locals())), nfunc, transform_source=js_to_json)[int(idx)]
+        return self._parse_json(
+            search_function_code('.+?', group='name'),
+            nfunc, transform_source=js_to_json)[int(idx)]
 
     def _extract_n_function(self, video_id, player_url):
         player_id = self._extract_player_info(player_url)
